@@ -1,16 +1,18 @@
 """
-AI-Powered Data Scraper (v2)
+AI-Powered Data Scraper (v3)
 ============================
-SerpAPI (Maps + Place Details + Yelp) + Perplexity AI (sonar-pro, focused calls)
-+ Fuzzy merge in code. Maximum data, straight to Excel.
+Fully dynamic: RCAFT prompt enhancement drives the entire pipeline.
+Works for ANY business type or search scenario.
 """
 
 import time
 import streamlit as st
 import pandas as pd
 
+from src.prompt_enhancer import enhance_prompt
 from src.ai_agent import (
-    generate_search_queries,
+    generate_maps_queries,
+    generate_web_search_queries,
     generate_location_info,
     fuzzy_merge_records,
     deduplicate_by_name,
@@ -19,13 +21,12 @@ from src.serp_search import (
     search_serp_multiple,
     enrich_with_place_details,
     search_google_local,
+    search_google_web,
     search_yelp,
 )
 from src.perplexity_research import (
     research_businesses,
-    research_amenities_and_services,
-    research_capacity_and_staff,
-    research_pricing_and_hours,
+    research_all_field_groups,
 )
 from src.excel_exporter import export_to_excel
 from src.config import OPENAI_API_KEY, SERPAPI_KEY, PERPLEXITY_API_KEY
@@ -44,6 +45,14 @@ st.markdown("""
     }
     .main-header h1 { color: #fff; font-size: 2rem; margin: 0 0 0.3rem 0; }
     .main-header p { color: #a0aec0; margin: 0; font-size: 0.95rem; }
+    .rcaft-card {
+        background: #f0f4ff; border: 1px solid #c3d4f7;
+        border-radius: 8px; padding: 0.6rem 0.8rem; margin: 0.3rem 0;
+    }
+    .group-card {
+        background: #f7f7f7; border-left: 3px solid #4a90d9;
+        padding: 0.5rem 0.8rem; margin: 0.3rem 0; border-radius: 4px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -51,74 +60,159 @@ st.markdown("""
 with st.sidebar:
     st.markdown("## 🔑 API Keys")
     if OPENAI_API_KEY and SERPAPI_KEY:
-        st.success("Keys loaded from .env file")
+        st.success("Keys loaded from .env")
     else:
-        st.info("Add keys below or set them in `.env` to persist")
+        st.info("Set keys in `.env` to persist")
     st.markdown("---")
 
-    openai_key = st.text_input("OpenAI API Key", value=OPENAI_API_KEY, type="password", placeholder="sk-...",
-                                help="Loaded from .env if set")
-    serpapi_key = st.text_input("SerpAPI Key", value=SERPAPI_KEY, type="password", placeholder="your serpapi key",
-                                 help="Get free: https://serpapi.com (100 searches/mo)")
-    perplexity_key = st.text_input("Perplexity API Key", value=PERPLEXITY_API_KEY, type="password", placeholder="pplx-...",
-                                    help="Get at: https://docs.perplexity.ai")
+    openai_key = st.text_input("OpenAI API Key", value=OPENAI_API_KEY, type="password", placeholder="sk-...")
+    serpapi_key = st.text_input("SerpAPI Key", value=SERPAPI_KEY, type="password", placeholder="your serpapi key")
+    perplexity_key = st.text_input("Perplexity API Key", value=PERPLEXITY_API_KEY, type="password", placeholder="pplx-...")
 
     st.markdown("---")
     st.markdown("## ⚙️ Settings")
 
-    num_queries = st.slider("Google Maps search queries", 1, 6, 3)
+    num_maps_queries = st.slider("Google Maps queries", 1, 6, 4)
     results_per_query = st.slider("Results per Maps query", 10, 80, 40)
+    num_web_queries = st.slider("Web search queries (directories)", 1, 8, 5)
 
     st.markdown("#### SerpAPI Options")
-    fetch_place_details = st.checkbox("Fetch Place Details (richer data per business)", value=True,
-                                       help="Uses 1 SerpAPI credit per place. Gets amenities, reviews, hours, etc.")
-    max_place_details = st.slider("Max places to get details for", 5, 60, 20) if fetch_place_details else 0
-    search_yelp_too = st.checkbox("Also search Yelp", value=False,
-                                   help="Uses 1 extra SerpAPI credit. Gets Yelp ratings and snippets.")
-    search_google_local_too = st.checkbox("Also search Google Local Pack", value=False,
-                                           help="Uses 1 extra SerpAPI credit per query.")
+    fetch_place_details = st.checkbox("Fetch Place Details", value=True)
+    max_place_details = st.slider("Max place details", 5, 60, 20) if fetch_place_details else 0
+    search_yelp_too = st.checkbox("Also search Yelp", value=False)
+    search_google_local_too = st.checkbox("Also search Google Local Pack", value=False)
 
     st.markdown("#### Perplexity Options")
     use_perplexity = st.checkbox("Use Perplexity AI", value=True)
-    pplx_discover = st.checkbox("Discover additional businesses", value=True,
-                                 help="Find businesses not in Google Maps")
-    pplx_amenities = st.checkbox("Research amenities & services", value=True)
-    pplx_capacity = st.checkbox("Research capacity & staffing", value=True)
-    pplx_pricing = st.checkbox("Research pricing & hours", value=True)
+    pplx_discover = st.checkbox("Discover additional businesses", value=True)
+    pplx_enrich = st.checkbox("Enrich with dynamic field groups", value=True,
+                               help="AI decides what categories of info to research based on your query")
 
     st.markdown("---")
     st.markdown("### Pipeline")
     st.markdown("""
-    1. AI generates search queries + location
-    2. **SerpAPI** → Google Maps listings
-    3. **SerpAPI** → Place Details (per business)
-    4. **SerpAPI** → Yelp + Google Local *(optional)*
-    5. **Perplexity** → Discover extra businesses
-    6. **Perplexity** → Amenities, Capacity, Pricing
-    7. **Fuzzy merge** all sources in code (lossless)
-    8. Push to Excel
+    **0.** RCAFT prompt enhancement (dynamic)
+    1. AI keyword strategy (Maps + Web)
+    2. SerpAPI → Google Maps
+    3. SerpAPI → Place Details
+    4. SerpAPI → Web search (directories/reviews)
+    5. Yelp + Local *(optional)*
+    6. Perplexity → Discover + **Dynamic enrichment**
+    7. Fuzzy merge → Excel
     """)
 
 # ─── Main ─────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="main-header">
-    <h1>🔍 AI Data Scraper v2</h1>
-    <p>SerpAPI (Maps + Place Details + Yelp) + Perplexity sonar-pro — maximum data coverage</p>
+    <h1>🔍 AI Data Scraper v3</h1>
+    <p>Fully dynamic — tell it what you need, AI figures out the rest</p>
 </div>
 """, unsafe_allow_html=True)
 
-requirement = st.text_area(
+raw_requirement = st.text_area(
     "📝 What data do you need?",
-    placeholder="e.g., All spas in Hyderabad with amenities, room capacity, manpower, pricing, contact info...",
-    height=100,
+    placeholder="Examples:\n"
+    "• All spas in Hyderabad with amenities, pricing, room capacity\n"
+    "• Top restaurants in Mumbai with menu, seating capacity, delivery options\n"
+    "• IT companies in Bangalore with tech stack, team size, clients\n"
+    "• Gyms in Delhi with equipment, membership plans, trainers",
+    height=120,
 )
 
-col1, col2 = st.columns([1, 4])
-with col1:
-    start_btn = st.button("🚀 Get Data", type="primary", use_container_width=True)
+# ─── Two-step flow ────────────────────────────────────────────────────
+btn_col1, btn_col2, _ = st.columns([1.2, 1.2, 3])
+with btn_col1:
+    enhance_btn = st.button("✨ Enhance Prompt", width="stretch")
+with btn_col2:
+    start_btn = st.button("🚀 Search Data", type="primary", width="stretch")
+
 st.markdown("---")
 
-# ─── Pipeline ─────────────────────────────────────────────────────────
+if "enhanced_data" not in st.session_state:
+    st.session_state["enhanced_data"] = None
+
+# ═══════════════════════════════════════════════════════════════════════
+# ENHANCE PROMPT
+# ═══════════════════════════════════════════════════════════════════════
+if enhance_btn:
+    if not openai_key:
+        st.error("Enter your OpenAI API key in the sidebar.")
+        st.stop()
+    if not raw_requirement.strip():
+        st.error("Type your requirement first.")
+        st.stop()
+
+    with st.spinner("✨ Enhancing with RCAFT framework..."):
+        try:
+            enhanced = enhance_prompt(openai_key, raw_requirement)
+            st.session_state["enhanced_data"] = enhanced
+        except Exception as e:
+            st.error(f"Enhancement failed: {e}")
+            st.stop()
+
+# ── Display enhanced prompt ───────────────────────────────────────────
+if st.session_state.get("enhanced_data"):
+    enhanced = st.session_state["enhanced_data"]
+    rcaft = enhanced.get("rcaft", {})
+    enhanced_prompt_text = enhanced.get("enhanced_prompt", raw_requirement)
+    search_keywords = enhanced.get("search_keywords", [])
+    data_fields = enhanced.get("data_fields", [])
+    target_sources = enhanced.get("target_sources", [])
+    field_groups = enhanced.get("field_groups", [])
+    domain = enhanced.get("domain", "")
+
+    st.markdown("### ✨ RCAFT-Enhanced Prompt")
+    if domain:
+        st.markdown(f"**Detected domain:** {domain}")
+
+    # RCAFT breakdown
+    r_cols = st.columns(5)
+    for col, label, key in zip(r_cols,
+        ["🎭 Role", "📋 Context", "⚡ Action", "📐 Format", "🎯 Tone"],
+        ["role", "context", "action", "format", "tone"]):
+        with col:
+            st.markdown(f"**{label}**")
+            st.caption(str(rcaft.get(key, "—"))[:150])
+
+    # Editable enhanced prompt
+    edited_prompt = st.text_area(
+        "📝 Enhanced Prompt (edit if needed, then click Search Data)",
+        value=enhanced_prompt_text, height=140, key="edited_enhanced_prompt",
+    )
+    st.session_state["enhanced_data"]["enhanced_prompt"] = edited_prompt
+
+    # Keywords, fields, sources
+    info_cols = st.columns(3)
+    with info_cols[0]:
+        if search_keywords:
+            st.markdown(f"**🔑 Keywords ({len(search_keywords)})**")
+            st.caption(", ".join(search_keywords[:10]))
+    with info_cols[1]:
+        if data_fields:
+            st.markdown(f"**📊 Data Fields ({len(data_fields)})**")
+            st.caption(", ".join(data_fields[:12]))
+    with info_cols[2]:
+        if target_sources:
+            st.markdown(f"**🌐 Sources ({len(target_sources)})**")
+            st.caption(", ".join(target_sources[:8]))
+
+    # Dynamic field groups preview
+    if field_groups:
+        st.markdown(f"#### 🔬 Research Groups ({len(field_groups)} dynamic categories)")
+        for g in field_groups:
+            gname = g.get("group_name", "?")
+            gfields = g.get("fields", [])
+            gprompt = g.get("research_prompt", "")
+            with st.expander(f"**{gname}** — {', '.join(gfields[:5])}"):
+                st.write(f"**Fields:** {', '.join(gfields)}")
+                st.write(f"**Research focus:** {gprompt[:300]}")
+
+    st.markdown("---")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SEARCH DATA (full pipeline)
+# ═══════════════════════════════════════════════════════════════════════
 if start_btn:
     if not openai_key:
         st.error("Enter your OpenAI API key.")
@@ -127,186 +221,248 @@ if start_btn:
         st.error("Enter your SerpAPI key.")
         st.stop()
     if use_perplexity and not perplexity_key:
-        st.error("Enter your Perplexity API key (or uncheck 'Use Perplexity AI').")
+        st.error("Enter your Perplexity API key (or uncheck Perplexity).")
         st.stop()
-    if not requirement.strip():
+    if not raw_requirement.strip():
         st.error("Describe what data you need.")
         st.stop()
 
     t_start = time.time()
     serp_records = []
+    web_search_results = []
     yelp_records = []
     local_records = []
     pplx_base_records = []
-    pplx_amenity_records = []
-    pplx_capacity_records = []
-    pplx_pricing_records = []
+    pplx_group_records = {}  # { group_name: [records] }
 
-    # ── Step 1: AI generates queries + location ──
+    # ── Get or create enhanced data ──
+    if st.session_state.get("enhanced_data"):
+        edata = st.session_state["enhanced_data"]
+        requirement = edata.get("enhanced_prompt", raw_requirement)
+        search_keywords = edata.get("search_keywords", [])
+        data_fields = edata.get("data_fields", [])
+        target_sources = edata.get("target_sources", [])
+        field_groups = edata.get("field_groups", [])
+        st.success("Using your RCAFT-enhanced prompt ✨")
+    else:
+        with st.status("✨ Step 0: Auto-enhancing with RCAFT...", expanded=True) as status:
+            try:
+                edata = enhance_prompt(openai_key, raw_requirement)
+                requirement = edata.get("enhanced_prompt", raw_requirement)
+                search_keywords = edata.get("search_keywords", [])
+                data_fields = edata.get("data_fields", [])
+                target_sources = edata.get("target_sources", [])
+                field_groups = edata.get("field_groups", [])
+
+                rcaft = edata.get("rcaft", {})
+                rc = st.columns(5)
+                for col, lbl, k in zip(rc,
+                    ["🎭 Role", "📋 Context", "⚡ Action", "📐 Format", "🎯 Tone"],
+                    ["role", "context", "action", "format", "tone"]):
+                    with col:
+                        st.markdown(f"**{lbl}**")
+                        st.caption(str(rcaft.get(k, "—"))[:120])
+
+                st.info(requirement[:400])
+
+                if field_groups:
+                    st.write(f"**Dynamic research groups:** {', '.join(g.get('group_name','') for g in field_groups)}")
+
+                status.update(label="✅ RCAFT enhancement done", state="complete")
+            except Exception as e:
+                st.warning(f"Enhancement failed: {e}. Using original input.")
+                requirement = raw_requirement
+                search_keywords = [raw_requirement]
+                data_fields = []
+                target_sources = []
+                field_groups = []
+
+    # ══════════════════════════════════════════════════════════════════
+    # STEP 1: AI Keyword Strategy + Location
+    # ══════════════════════════════════════════════════════════════════
     with st.status("🧠 Step 1: AI generating search queries...", expanded=True) as status:
         try:
-            queries = generate_search_queries(openai_key, requirement, num_queries=num_queries)
-            for i, q in enumerate(queries, 1):
-                st.write(f"  {i}. `{q}`")
-
-            st.write("Detecting location coordinates...")
             loc = generate_location_info(openai_key, requirement)
             lat = loc.get("latitude")
             lng = loc.get("longitude")
             city = loc.get("city", "")
             yelp_loc = loc.get("yelp_location", city)
             if lat and lng:
-                st.write(f"  Location: **{city}** ({lat}, {lng})")
-            else:
-                st.write(f"  Location: **{city}** (no coordinates, using default)")
+                st.write(f"📍 **{city}** ({lat}, {lng})")
 
-            status.update(label=f"✅ {len(queries)} queries + location", state="complete")
+            maps_queries = generate_maps_queries(
+                openai_key, requirement, search_keywords, city, num_queries=num_maps_queries
+            )
+            for i, q in enumerate(maps_queries, 1):
+                st.write(f"  🗺️ {i}. `{q}`")
+
+            web_queries = generate_web_search_queries(
+                openai_key, requirement, search_keywords, city, target_sources, num_queries=num_web_queries
+            )
+            for i, q in enumerate(web_queries, 1):
+                st.write(f"  🌐 {i}. `{q}`")
+
+            status.update(label=f"✅ {len(maps_queries)} Maps + {len(web_queries)} Web queries", state="complete")
         except Exception as e:
-            st.error(f"Failed: {e}")
+            st.error(f"Query generation failed: {e}")
             st.stop()
 
-    # ── Step 2: SerpAPI Google Maps ──
-    with st.status("🗺️ Step 2: Google Maps listings (SerpAPI)...", expanded=True) as status:
+    # ══════════════════════════════════════════════════════════════════
+    # STEP 2: SerpAPI Google Maps
+    # ══════════════════════════════════════════════════════════════════
+    with st.status("🗺️ Step 2: Google Maps listings...", expanded=True) as status:
         try:
             serp_records = search_serp_multiple(
-                queries, serpapi_key, results_per_query=results_per_query,
+                maps_queries, serpapi_key, results_per_query=results_per_query,
                 lat=lat, lng=lng,
             )
             st.write(f"**{len(serp_records)} unique businesses from Google Maps**")
             if serp_records:
-                names_preview = [r.get("Name", "?") for r in serp_records[:8]]
-                st.write("Preview: " + ", ".join(names_preview) + "...")
-            status.update(label=f"✅ {len(serp_records)} from Google Maps", state="complete")
+                st.write("Preview: " + ", ".join(r.get("Name", "?") for r in serp_records[:8]) + "...")
+            status.update(label=f"✅ {len(serp_records)} from Maps", state="complete")
         except Exception as e:
-            st.warning(f"Google Maps search failed: {e}")
+            st.warning(f"Google Maps failed: {e}")
 
-    # ── Step 3: SerpAPI Place Details ──
+    # ══════════════════════════════════════════════════════════════════
+    # STEP 3: Place Details
+    # ══════════════════════════════════════════════════════════════════
     if fetch_place_details and serp_records and max_place_details > 0:
-        with st.status(f"🏢 Step 3: Fetching Place Details for up to {max_place_details} businesses...", expanded=True) as status:
+        with st.status(f"🏢 Step 3: Place Details ({max_place_details} places)...", expanded=True) as status:
             progress = st.progress(0)
-            detail_log = st.empty()
+            log = st.empty()
 
-            def detail_progress(current, total, name):
-                progress.progress(current / total if total > 0 else 0)
-                detail_log.write(f"  [{current+1}/{total}] {name}")
+            def _cb(cur, tot, name):
+                progress.progress(cur / tot if tot > 0 else 0)
+                log.write(f"  [{cur+1}/{tot}] {name}")
 
             try:
                 serp_records = enrich_with_place_details(
-                    serp_records, serpapi_key, max_places=max_place_details,
-                    progress_callback=detail_progress,
+                    serp_records, serpapi_key, max_places=max_place_details, progress_callback=_cb,
                 )
                 progress.progress(1.0)
-                st.write(f"**Enriched {min(max_place_details, len(serp_records))} businesses with full details**")
-                status.update(label=f"✅ Place Details enriched", state="complete")
+                status.update(label="✅ Place Details enriched", state="complete")
             except Exception as e:
                 st.warning(f"Place Details failed: {e}")
-    else:
-        st.info("Skipping Place Details (disabled or no results).")
 
-    # ── Step 4: Yelp + Google Local (optional) ──
+    # ══════════════════════════════════════════════════════════════════
+    # STEP 4: Web Search (directories, reviews, third-party)
+    # ══════════════════════════════════════════════════════════════════
+    with st.status("🌐 Step 4: Searching directories & review sites...", expanded=True) as status:
+        try:
+            web_search_results = search_google_web(
+                web_queries, serpapi_key, location=city, results_per_query=10,
+            )
+            st.write(f"**{len(web_search_results)} third-party pages found**")
+            for r in web_search_results[:5]:
+                st.write(f"  • [{r.get('Source Domain', '')}] {r.get('Title', '')[:70]}")
+            status.update(label=f"✅ {len(web_search_results)} directory pages", state="complete")
+        except Exception as e:
+            st.warning(f"Web search failed: {e}")
+
+    # ══════════════════════════════════════════════════════════════════
+    # STEP 5: Yelp + Local (optional)
+    # ══════════════════════════════════════════════════════════════════
     if search_yelp_too and yelp_loc:
-        with st.status("🍽️ Step 4a: Searching Yelp...", expanded=True) as status:
+        with st.status("🔎 Step 5a: Yelp...", expanded=True) as status:
             try:
-                yelp_query = queries[0] if queries else requirement
-                yelp_records = search_yelp(yelp_query, serpapi_key, location=yelp_loc)
+                yelp_records = search_yelp(maps_queries[0], serpapi_key, location=yelp_loc)
                 st.write(f"**{len(yelp_records)} from Yelp**")
                 status.update(label=f"✅ {len(yelp_records)} from Yelp", state="complete")
             except Exception as e:
-                st.warning(f"Yelp search failed: {e}")
+                st.warning(f"Yelp failed: {e}")
 
     if search_google_local_too:
-        with st.status("📍 Step 4b: Google Local Pack...", expanded=True) as status:
+        with st.status("📍 Step 5b: Local Pack...", expanded=True) as status:
             try:
-                for q in queries[:2]:
+                for q in maps_queries[:2]:
                     local_records.extend(search_google_local(q, serpapi_key, location=city))
-                st.write(f"**{len(local_records)} from Google Local Pack**")
-                status.update(label=f"✅ {len(local_records)} from Local Pack", state="complete")
+                st.write(f"**{len(local_records)} from Local Pack**")
+                status.update(label=f"✅ {len(local_records)} from Local", state="complete")
             except Exception as e:
-                st.warning(f"Google Local failed: {e}")
+                st.warning(f"Local failed: {e}")
 
-    # ── Step 5: Perplexity AI ──
-    all_names_so_far = [r.get("Name", "") for r in serp_records + yelp_records + local_records if r.get("Name")]
+    # ══════════════════════════════════════════════════════════════════
+    # STEP 6: Perplexity — Dynamic Research
+    # ══════════════════════════════════════════════════════════════════
+    all_names = [r.get("Name", "") for r in serp_records + yelp_records + local_records if r.get("Name")]
+
+    # Build web context for Perplexity
+    web_context = ""
+    if web_search_results:
+        snippets = [f"- {r.get('Title','')}: {r.get('Snippet','')}" for r in web_search_results[:15]]
+        web_context = "\n\nRelevant web sources:\n" + "\n".join(snippets)
+
+    pplx_req = requirement + web_context
 
     if use_perplexity and perplexity_key:
-        # 5a: Discover additional businesses
+        # 6a: Discover additional businesses
         if pplx_discover:
-            with st.status("🔬 Step 5a: Perplexity discovering extra businesses...", expanded=True) as status:
+            with st.status("🔬 Step 6a: Discovering additional businesses...", expanded=True) as status:
                 try:
-                    pplx_base_records = research_businesses(perplexity_key, requirement, existing_names=all_names_so_far)
-                    st.write(f"**{len(pplx_base_records)} additional businesses from Perplexity**")
-                    status.update(label=f"✅ +{len(pplx_base_records)} from Perplexity", state="complete")
+                    pplx_base_records = research_businesses(
+                        perplexity_key, pplx_req, data_fields=data_fields, existing_names=all_names
+                    )
+                    st.write(f"**+{len(pplx_base_records)} additional businesses**")
+                    status.update(label=f"✅ +{len(pplx_base_records)} discovered", state="complete")
                 except Exception as e:
-                    st.warning(f"Perplexity discovery failed: {e}")
+                    st.warning(f"Discovery failed: {e}")
 
         # Collect all names for enrichment
         all_names_for_enrichment = list(set(
-            all_names_so_far + [r.get("Name", "") for r in pplx_base_records if r.get("Name")]
+            all_names + [r.get("Name", "") for r in pplx_base_records if r.get("Name")]
         ))
 
-        # 5b: Amenities & services
-        if pplx_amenities and all_names_for_enrichment:
-            with st.status(f"🧖 Step 5b: Researching amenities for {len(all_names_for_enrichment)} businesses...", expanded=True) as status:
-                try:
-                    pplx_amenity_records = research_amenities_and_services(
-                        perplexity_key, requirement, all_names_for_enrichment
-                    )
-                    st.write(f"**Got amenity data for {len(pplx_amenity_records)} businesses**")
-                    status.update(label=f"✅ Amenities: {len(pplx_amenity_records)}", state="complete")
-                except Exception as e:
-                    st.warning(f"Amenity research failed: {e}")
+        # 6b: Dynamic field group enrichment
+        if pplx_enrich and field_groups and all_names_for_enrichment:
+            st.markdown(f"#### 🔬 Researching {len(field_groups)} dynamic categories...")
 
-        # 5c: Capacity & staffing
-        if pplx_capacity and all_names_for_enrichment:
-            with st.status(f"👥 Step 5c: Researching capacity & staff...", expanded=True) as status:
-                try:
-                    pplx_capacity_records = research_capacity_and_staff(
-                        perplexity_key, requirement, all_names_for_enrichment
-                    )
-                    st.write(f"**Got capacity data for {len(pplx_capacity_records)} businesses**")
-                    status.update(label=f"✅ Capacity: {len(pplx_capacity_records)}", state="complete")
-                except Exception as e:
-                    st.warning(f"Capacity research failed: {e}")
+            for idx, group in enumerate(field_groups):
+                gname = group.get("group_name", f"Group {idx+1}")
+                gfields = group.get("fields", [])
+                gprompt = group.get("research_prompt", "")
 
-        # 5d: Pricing & hours
-        if pplx_pricing and all_names_for_enrichment:
-            with st.status(f"💰 Step 5d: Researching pricing & hours...", expanded=True) as status:
-                try:
-                    pplx_pricing_records = research_pricing_and_hours(
-                        perplexity_key, requirement, all_names_for_enrichment
-                    )
-                    st.write(f"**Got pricing data for {len(pplx_pricing_records)} businesses**")
-                    status.update(label=f"✅ Pricing: {len(pplx_pricing_records)}", state="complete")
-                except Exception as e:
-                    st.warning(f"Pricing research failed: {e}")
+                if not gfields:
+                    continue
 
-    # ── Step 6: Fuzzy merge all sources ──
-    with st.status("🔀 Step 6: Merging all data (fuzzy match)...", expanded=True) as status:
-        # Primary source: SerpAPI Google Maps (most structured)
+                with st.status(
+                    f"📊 Step 6.{idx+2}: {gname} ({len(all_names_for_enrichment)} businesses)...",
+                    expanded=True
+                ) as status:
+                    try:
+                        from src.perplexity_research import research_field_group
+                        records = research_field_group(
+                            perplexity_key, pplx_req, all_names_for_enrichment,
+                            gname, gfields, gprompt,
+                        )
+                        pplx_group_records[gname] = records
+                        st.write(f"**{gname}: data for {len(records)} businesses**")
+                        st.write(f"Fields: {', '.join(gfields[:6])}")
+                        status.update(label=f"✅ {gname}: {len(records)} records", state="complete")
+                    except Exception as e:
+                        st.warning(f"{gname} failed: {e}")
+                        pplx_group_records[gname] = []
+
+    # ══════════════════════════════════════════════════════════════════
+    # STEP 7: Fuzzy merge + Excel
+    # ══════════════════════════════════════════════════════════════════
+    with st.status("🔀 Step 7: Merging all data...", expanded=True) as status:
         primary = serp_records if serp_records else []
 
-        # All secondary sources
-        secondary_lists = [
-            s for s in [
-                yelp_records,
-                local_records,
-                pplx_base_records,
-                pplx_amenity_records,
-                pplx_capacity_records,
-                pplx_pricing_records,
-            ] if s
-        ]
+        # Flatten all Perplexity group results into secondary lists
+        secondary_lists = [s for s in [yelp_records, local_records, pplx_base_records] if s]
+        for gname, grecords in pplx_group_records.items():
+            if grecords:
+                secondary_lists.append(grecords)
 
         if primary or secondary_lists:
             if primary:
                 final_records = fuzzy_merge_records(primary, *secondary_lists)
             else:
-                # No primary — use the first non-empty list as primary
                 all_lists = secondary_lists
                 final_records = fuzzy_merge_records(all_lists[0], *all_lists[1:]) if all_lists else []
         else:
             final_records = []
 
-        # Deduplicate
         before_dedup = len(final_records)
         final_records = deduplicate_by_name(final_records)
 
@@ -316,9 +472,8 @@ if start_btn:
             r.pop("Place ID", None)
             r.pop("Thumbnail", None)
 
-        st.write(f"Merged: {before_dedup} → **{len(final_records)} unique records** after dedup")
+        st.write(f"**{before_dedup} → {len(final_records)} unique records**")
 
-        # Show source breakdown
         source_counts = {}
         for r in final_records:
             src = r.get("Data Source", "Unknown")
@@ -326,16 +481,22 @@ if start_btn:
         for src, cnt in source_counts.items():
             st.write(f"  • {src}: {cnt}")
 
-        status.update(label=f"✅ {len(final_records)} merged records", state="complete")
+        # Show field coverage
+        if final_records:
+            all_fields = set()
+            for r in final_records:
+                all_fields.update(r.keys())
+            st.write(f"  • **{len(all_fields)} total fields** collected across all records")
+
+        status.update(label=f"✅ {len(final_records)} records merged", state="complete")
 
     if not final_records:
-        st.error("No data found. Try broadening your requirement or checking API keys.")
+        st.error("No data found. Try broadening your requirement.")
         st.stop()
 
-    # ── Step 7: Excel ──
-    with st.status("📊 Step 7: Pushing to Excel...", expanded=True) as status:
+    with st.status("📊 Exporting to Excel...", expanded=True) as status:
         try:
-            filepath = export_to_excel(final_records, requirement)
+            filepath = export_to_excel(final_records, raw_requirement)
             st.success(f"`{filepath}`")
             status.update(label="✅ Excel ready", state="complete")
         except Exception as e:
@@ -348,43 +509,39 @@ if start_btn:
     st.markdown("---")
 
     # Metrics
-    cols = st.columns(5)
-    with cols[0]:
-        st.metric("Records", len(final_records))
-    with cols[1]:
+    metric_cols = st.columns(5)
+    with metric_cols[0]:
+        st.metric("Total Records", len(final_records))
+    with metric_cols[1]:
         st.metric("Google Maps", len(serp_records))
-    with cols[2]:
-        pplx_total = len(pplx_base_records) + len(pplx_amenity_records) + len(pplx_capacity_records) + len(pplx_pricing_records)
-        st.metric("Perplexity Calls", sum(1 for x in [pplx_base_records, pplx_amenity_records, pplx_capacity_records, pplx_pricing_records] if x))
-    with cols[3]:
-        other = len(yelp_records) + len(local_records)
-        st.metric("Yelp + Local", other)
-    with cols[4]:
+    with metric_cols[2]:
+        st.metric("Web Pages", len(web_search_results))
+    with metric_cols[3]:
+        enrich_groups = sum(1 for v in pplx_group_records.values() if v)
+        st.metric("Enrichment Groups", enrich_groups)
+    with metric_cols[4]:
         st.metric("Time", f"{elapsed:.0f}s")
 
-    # Data
+    # Data preview
     st.markdown("### Data Preview")
-    df = pd.DataFrame(final_records)
-    st.dataframe(df, use_container_width=True, height=450)
+    df = pd.DataFrame(final_records).astype(str).replace("None", "")
+    st.dataframe(df, width="stretch", height=450)
 
-    # Column stats
+    # Column completeness
     st.markdown("### Column Completeness")
     completeness = {}
     for col in df.columns:
         filled = df[col].notna().sum() - (df[col] == "").sum()
         completeness[col] = f"{filled}/{len(df)} ({filled/len(df)*100:.0f}%)" if len(df) > 0 else "0"
-    comp_df = pd.DataFrame([completeness])
-    st.dataframe(comp_df, use_container_width=True)
+    st.dataframe(pd.DataFrame([completeness]), width="stretch")
 
     # Download
     with open(filepath, "rb") as f:
         st.download_button(
-            label="⬇️ Download Excel",
-            data=f.read(),
+            label="⬇️ Download Excel", data=f.read(),
             file_name=filepath.split("/")[-1],
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-            use_container_width=True,
+            type="primary", width="stretch",
         )
 
     st.session_state["result_records"] = final_records
@@ -396,19 +553,17 @@ elif "result_records" in st.session_state:
     filepath = st.session_state.get("result_filepath", "")
 
     st.info(f"Previous run — **{len(records)} records**")
-    df = pd.DataFrame(records)
-    st.dataframe(df, use_container_width=True, height=400)
+    df = pd.DataFrame(records).astype(str).replace("None", "")
+    st.dataframe(df, width="stretch", height=400)
 
     if filepath:
         try:
             with open(filepath, "rb") as f:
                 st.download_button(
-                    label="⬇️ Download Excel",
-                    data=f.read(),
+                    label="⬇️ Download Excel", data=f.read(),
                     file_name=filepath.split("/")[-1],
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    type="primary",
-                    use_container_width=True,
+                    type="primary", width="stretch",
                 )
         except FileNotFoundError:
             st.warning("File not found. Run a new scrape.")

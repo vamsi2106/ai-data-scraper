@@ -1,5 +1,6 @@
 """
-AI Agent module — query generation + deterministic fuzzy merge (no LLM merge).
+AI Agent module — RCAFT-enhanced query generation, smart keyword strategy,
+deterministic fuzzy merge.
 """
 
 import json
@@ -45,21 +46,73 @@ def _extract_json(text: str):
     raise ValueError(f"Could not extract JSON:\n{text[:500]}")
 
 
-# ── Query generation ────────────────────────────────────────────────
+# ── Smart query generation using RCAFT-enhanced context ─────────────
 
-def generate_search_queries(api_key: str, requirement: str, num_queries: int = 3) -> list[str]:
-    """Generate optimized Google Maps search queries."""
+def generate_maps_queries(
+    api_key: str, enhanced_prompt: str, search_keywords: list[str], location: str, num_queries: int = 4
+) -> list[str]:
+    """Generate Google Maps search queries using RCAFT-enhanced context."""
     system = (
-        "You generate Google Maps search queries for finding local businesses.\n"
-        "Return ONLY a JSON array of search query strings.\n"
-        "Each query should target a different angle to maximize coverage:\n"
-        "- One broad query (e.g., 'spas in Hyderabad')\n"
-        "- One specific query (e.g., 'luxury wellness spa Hyderabad Banjara Hills')\n"
-        "- One niche query (e.g., 'ayurvedic spa treatment center Hyderabad')"
+        "You generate Google Maps search queries for maximum business coverage.\n"
+        "Return ONLY a JSON array of query strings.\n\n"
+        "Strategy:\n"
+        "- Include broad category queries ('spas in Hyderabad')\n"
+        "- Include specific niche queries ('ayurvedic spa Banjara Hills Hyderabad')\n"
+        "- Include service-based queries ('body massage wellness center Hyderabad')\n"
+        "- Include area-specific queries for different neighborhoods\n"
+        "- Use the provided keywords as inspiration but optimize for Google Maps"
     )
+    keywords_str = ", ".join(search_keywords[:10]) if search_keywords else ""
     user = (
-        f"Requirement: {requirement}\n\n"
-        f"Generate exactly {num_queries} diverse Google Maps search queries."
+        f"Enhanced requirement: {enhanced_prompt}\n"
+        f"Location: {location}\n"
+        f"Seed keywords: {keywords_str}\n\n"
+        f"Generate exactly {num_queries} diverse Google Maps queries for maximum coverage."
+    )
+    client = _client(api_key)
+    raw = _chat(client, system, user)
+    queries = _extract_json(raw)
+    if isinstance(queries, list):
+        return [str(q) for q in queries[:num_queries]]
+    raise ValueError("AI did not return a list of queries")
+
+
+def generate_web_search_queries(
+    api_key: str, enhanced_prompt: str, search_keywords: list[str], location: str, target_sources: list[str], num_queries: int = 5
+) -> list[str]:
+    """
+    Generate Google web search queries targeting DIRECTORY SITES, REVIEW SITES,
+    and THIRD-PARTY sources that have data NOT available on official business websites.
+    """
+    system = (
+        "You generate Google web search queries specifically designed to find\n"
+        "business data on THIRD-PARTY sites — NOT the businesses' own websites.\n\n"
+        "Return ONLY a JSON array of query strings.\n\n"
+        "Target these source types:\n"
+        "- Indian business directories: JustDial, Sulekha, IndiaMART, TradeIndia\n"
+        "- Review platforms: TripAdvisor, Google Reviews, MouthShut, Yelp\n"
+        "- Listing aggregators: Practo, UrbanClap, BookMyShow, NearBuy\n"
+        "- Blog/article listings: 'top 10 spas in [city]', 'best rated [business]'\n"
+        "- Yellow pages and B2B directories\n"
+        "- Government/licensing databases if applicable\n\n"
+        "Use 'site:' operator for known directories.\n"
+        "Use 'intitle:' for article/list-style pages.\n"
+        "Use location qualifiers for geographic targeting.\n"
+        "These queries will be used with regular Google search, NOT Google Maps."
+    )
+    sources_str = ", ".join(target_sources[:10]) if target_sources else ""
+    keywords_str = ", ".join(search_keywords[:10]) if search_keywords else ""
+    user = (
+        f"Requirement: {enhanced_prompt}\n"
+        f"Location: {location}\n"
+        f"Target sources: {sources_str}\n"
+        f"Keywords: {keywords_str}\n\n"
+        f"Generate exactly {num_queries} Google web search queries that will find:\n"
+        "1. Directory listings with detailed business profiles\n"
+        "2. Review pages with ratings, comments, and details\n"
+        "3. Blog/article pages that list and compare businesses\n"
+        "4. Third-party sites with data like pricing, amenities, staff info\n"
+        "5. Any source with information NOT on the business's own website"
     )
     client = _client(api_key)
     raw = _chat(client, system, user)
@@ -89,7 +142,6 @@ def generate_location_info(api_key: str, requirement: str) -> dict:
 # ── Deterministic fuzzy merge (no LLM) ─────────────────────────────
 
 def _get_name(record: dict) -> str:
-    """Extract the name from a record, trying common key variations."""
     for key in ["Name", "name", "Business Name", "business_name", "Title", "title"]:
         val = record.get(key, "")
         if val:
@@ -98,12 +150,13 @@ def _get_name(record: dict) -> str:
 
 
 def _normalize_name(name: str) -> str:
-    """Normalize a business name for matching."""
+    """Normalize a business name for matching. Domain-agnostic."""
+    import re as _re
     name = name.lower().strip()
-    # Remove common suffixes
-    for suffix in [" - hyderabad", " hyderabad", ", hyderabad", " spa", " wellness"]:
-        if name.endswith(suffix):
-            name = name[: -len(suffix)]
+    # Remove common location/city suffixes (generic pattern)
+    name = _re.sub(r'\s*[-–,]\s*\w+$', '', name)
+    # Remove extra whitespace
+    name = _re.sub(r'\s+', ' ', name)
     return name.strip()
 
 
@@ -114,12 +167,10 @@ def fuzzy_merge_records(
 ) -> list[dict]:
     """
     Merge multiple record lists using fuzzy name matching.
-    - primary records are the base (never dropped)
-    - secondary records enrich primary or get appended if no match
-    - No data is lost. No LLM involved. Deterministic.
+    Primary records are the base. Secondary fills gaps or appends new ones.
+    No data lost. No LLM. Deterministic.
     """
-    # Build the merged list starting from primary
-    merged = [dict(r) for r in primary]  # deep copy
+    merged = [dict(r) for r in primary]
     merged_names = [_normalize_name(_get_name(r)) for r in merged]
 
     for secondary in secondary_lists:
@@ -130,7 +181,6 @@ def fuzzy_merge_records(
                 merged_names.append("")
                 continue
 
-            # Find best match in merged
             best_score = 0
             best_idx = -1
             for i, m_name in enumerate(merged_names):
@@ -142,14 +192,12 @@ def fuzzy_merge_records(
                     best_idx = i
 
             if best_score >= match_threshold and best_idx >= 0:
-                # Merge: fill in gaps in the primary record
                 for k, v in sec_record.items():
                     if v is not None and str(v).strip():
                         existing = merged[best_idx].get(k)
                         if not existing or not str(existing).strip():
                             merged[best_idx][k] = v
             else:
-                # No match — new business, append it
                 merged.append(dict(sec_record))
                 merged_names.append(sec_name)
 
@@ -157,7 +205,6 @@ def fuzzy_merge_records(
 
 
 def deduplicate_by_name(records: list[dict], threshold: int = 85) -> list[dict]:
-    """Remove near-duplicate records by fuzzy name matching."""
     result = []
     seen_names = []
 

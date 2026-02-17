@@ -237,6 +237,68 @@ def search_google_local(
     return results
 
 
+# ── Google Web Search (for directory/third-party sites) ─────────────
+
+def search_google_web(
+    queries: list[str],
+    api_key: str,
+    location: str = "",
+    results_per_query: int = 10,
+) -> list[dict]:
+    """
+    Search regular Google for directory listings, review sites, and articles
+    that contain business data not available on official websites.
+    Returns structured records extracted from organic result snippets.
+    """
+    all_results = []
+    seen_urls = set()
+
+    for query in queries:
+        params = {
+            "engine": "google",
+            "q": query,
+            "api_key": api_key,
+            "num": results_per_query,
+            "hl": "en",
+        }
+        if location:
+            params["location"] = location
+
+        try:
+            search = GoogleSearch(params)
+            data = search.get_dict()
+
+            # Organic results (directory pages, articles, etc.)
+            for item in data.get("organic_results", []):
+                url = item.get("link", "")
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                all_results.append({
+                    "Title": item.get("title", ""),
+                    "URL": url,
+                    "Snippet": item.get("snippet", ""),
+                    "Source Domain": item.get("displayed_link", ""),
+                    "Position": item.get("position", ""),
+                })
+
+            # Knowledge graph if available
+            kg = data.get("knowledge_graph", {})
+            if kg:
+                all_results.append({
+                    "Title": kg.get("title", ""),
+                    "URL": kg.get("website", ""),
+                    "Snippet": kg.get("description", ""),
+                    "Source Domain": "Knowledge Graph",
+                    "Position": 0,
+                })
+
+        except Exception as e:
+            print(f"[SerpAPI/Web] Error searching '{query}': {e}")
+
+    return all_results
+
+
 # ── Yelp search ─────────────────────────────────────────────────────
 
 def search_yelp(query: str, api_key: str, location: str = "", num_results: int = 30) -> list[dict]:
